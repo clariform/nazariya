@@ -9,7 +9,8 @@ from rich.table import Table
 
 from nazariya import __version__
 from nazariya.preview import build_previews
-from nazariya.sample import sample_candidates
+from nazariya.review import make_contact_sheets, make_overrides_template
+from nazariya.sample import sample_candidates, swap_sample_row
 
 app = typer.Typer(
     help="Local visual search and clustering for image archives.",
@@ -52,6 +53,7 @@ def init(
     """Create a minimal data folder layout."""
     folders = [
         root / "inputs",
+        root / "config",
         root / "previews",
         root / "normalized",
         root / "features",
@@ -125,6 +127,123 @@ def sample(
     console.print(table)
 
 
+@app.command("swap-sample")
+def swap_sample_command(
+    full: Path = typer.Option(
+        ...,
+        "--full",
+        help="Full Lightroom candidate CSV.",
+    ),
+    sample: Path = typer.Option(
+        ...,
+        "--sample",
+        help="Current sampled CSV.",
+    ),
+    output: Path = typer.Option(
+        ...,
+        "--output",
+        "-o",
+        help="Output sampled CSV with one row swapped.",
+    ),
+    candidate: str = typer.Option(
+        ...,
+        "--candidate",
+        help="Candidate key to modify, for example c014.",
+    ),
+    remove_file: str | None = typer.Option(
+        None,
+        "--remove-file",
+        help="File name to remove from the sample, for example DSC01234.ARW.",
+    ),
+    remove_source_path: str | None = typer.Option(
+        None,
+        "--remove-source-path",
+        help="Exact source_path to remove from the sample.",
+    ),
+    remove_image_id: str | None = typer.Option(
+        None,
+        "--remove-image-id",
+        help="Image id to remove if the CSV contains image_id.",
+    ),
+    seed: int = typer.Option(
+        42,
+        "--seed",
+        help="Random seed for choosing the replacement.",
+    ),
+    group_column: str = typer.Option(
+        "primary_candidate_key",
+        "--group-column",
+        help="CSV column used as the candidate grouping key.",
+    ),
+) -> None:
+    """Swap one sampled row for another image from the same candidate set."""
+    result = swap_sample_row(
+        full_input_path=full,
+        sample_input_path=sample,
+        output_path=output,
+        candidate_key=candidate,
+        remove_file=remove_file,
+        remove_source_path=remove_source_path,
+        remove_image_id=remove_image_id,
+        seed=seed,
+        group_column=group_column,
+    )
+
+    table = Table(title="Nazariya swap sample")
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+
+    table.add_row("Full input", str(result.full_input_path))
+    table.add_row("Sample input", str(result.sample_input_path))
+    table.add_row("Output", str(result.output_path))
+    table.add_row("Candidate", str(result.candidate_key))
+    table.add_row("Removed rows", str(result.removed_count))
+    table.add_row("Added rows", str(result.added_count))
+    table.add_row("Final rows", str(result.final_rows))
+    table.add_row("Added file", str(result.added_file_name))
+    table.add_row("Added source", str(result.added_source_path))
+
+    console.print(table)
+
+
+@app.command("make-overrides-template")
+def make_overrides_template_command(
+    input: Path = typer.Option(
+        ...,
+        "--input",
+        "-i",
+        help="Input candidate CSV.",
+    ),
+    output: Path = typer.Option(
+        Path("data/config/candidate_overrides.csv"),
+        "--output",
+        "-o",
+        help="Output candidate override CSV template.",
+    ),
+    include_examples: bool = typer.Option(
+        False,
+        "--include-examples",
+        help="Include example override rows at the top.",
+    ),
+) -> None:
+    """Create a per-candidate override CSV template."""
+    result = make_overrides_template(
+        input_path=input,
+        output_path=output,
+        include_examples=include_examples,
+    )
+
+    table = Table(title="Nazariya override template")
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+
+    table.add_row("Input", str(result.input_path))
+    table.add_row("Output", str(result.output_path))
+    table.add_row("Candidate groups", str(result.candidate_count))
+
+    console.print(table)
+
+
 @app.command("build-previews")
 def build_previews_command(
     input: Path = typer.Option(
@@ -147,12 +266,32 @@ def build_previews_command(
     low_pct: float = typer.Option(
         0.5,
         "--low-pct",
-        help="Low luminance percentile for exposure normalization.",
+        help="Low luminance percentile for percentile exposure normalization.",
     ),
     high_pct: float = typer.Option(
         99.5,
         "--high-pct",
-        help="High luminance percentile for exposure normalization.",
+        help="High luminance percentile for percentile exposure normalization.",
+    ),
+    exposure_mode: str = typer.Option(
+        "center-midtone",
+        "--exposure-mode",
+        help="Exposure mode: percentile, midtone, center-midtone.",
+    ),
+    target_median: float = typer.Option(
+        0.38,
+        "--target-median",
+        help="Target midtone median for midtone exposure modes.",
+    ),
+    overrides: Path | None = typer.Option(
+        None,
+        "--overrides",
+        help="Optional candidate override CSV with per-set normalization settings.",
+    ),
+    candidate: str | None = typer.Option(
+        None,
+        "--candidate",
+        help="Only build previews for one candidate set, for example c014.",
     ),
     wb: str = typer.Option(
         "daylight",
@@ -186,6 +325,10 @@ def build_previews_command(
             high_pct=high_pct,
             wb_mode=wb,
             user_wb_text=user_wb,
+            exposure_mode=exposure_mode,
+            target_median=target_median,
+            overrides_path=overrides,
+            candidate_filter=candidate,
             overwrite=overwrite,
         )
         progress.update(task, description="Finished building RAW previews.")
@@ -201,6 +344,10 @@ def build_previews_command(
     table.add_row("Skipped existing", str(result.skipped_existing))
     table.add_row("Failed", str(result.failed))
     table.add_row("WB mode", str(result.wb_mode))
+    table.add_row("Exposure mode", str(result.exposure_mode))
+    table.add_row("Overrides", str(result.overrides_path or "None"))
+    table.add_row("Overrides loaded", str(result.overrides_loaded))
+    table.add_row("Candidate filter", str(result.candidate_filter or "None"))
     table.add_row("Preview map", str(result.preview_map_path))
     table.add_row("Failures", str(result.failures_path))
 
@@ -210,6 +357,50 @@ def build_previews_command(
         console.print(
             "[yellow]Some RAW files failed. Check failures.csv before continuing.[/yellow]"
         )
+
+
+@app.command("contact-sheets")
+def contact_sheets_command(
+    preview_map: Path = typer.Option(
+        ...,
+        "--preview-map",
+        help="Preview map CSV generated by build-previews.",
+    ),
+    output: Path = typer.Option(
+        Path("data/reports/contact_sheets"),
+        "--output",
+        "-o",
+        help="Output folder for candidate contact sheets.",
+    ),
+    thumb_size: int = typer.Option(
+        320,
+        "--thumb-size",
+        help="Thumbnail size in pixels.",
+    ),
+    columns: int = typer.Option(
+        3,
+        "--columns",
+        help="Number of columns per contact sheet.",
+    ),
+) -> None:
+    """Create one contact sheet per candidate set."""
+    result = make_contact_sheets(
+        preview_map_path=preview_map,
+        output_dir=output,
+        thumb_size=thumb_size,
+        columns=columns,
+    )
+
+    table = Table(title="Nazariya contact sheets")
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+
+    table.add_row("Preview map", str(result.preview_map_path))
+    table.add_row("Output", str(result.output_dir))
+    table.add_row("Sheets written", str(result.sheets_written))
+    table.add_row("Images", str(result.image_count))
+
+    console.print(table)
 
 
 if __name__ == "__main__":

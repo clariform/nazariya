@@ -12,6 +12,18 @@ from PIL import Image
 
 
 VALID_WB_MODES = {"daylight", "camera", "auto", "gray-world", "custom"}
+VALID_EXPOSURE_MODES = {"percentile", "midtone", "center-midtone"}
+
+
+@dataclass(frozen=True)
+class PreviewSettings:
+    wb_mode: str
+    exposure_mode: str
+    target_median: float
+    low_pct: float
+    high_pct: float
+    user_wb_text: str | None = None
+    override_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -25,6 +37,10 @@ class PreviewBuildResult:
     preview_map_path: Path
     failures_path: Path
     wb_mode: str
+    exposure_mode: str
+    overrides_path: Path | None
+    overrides_loaded: int
+    candidate_filter: str | None
 
 
 def stable_id(value: str) -> str:
@@ -50,11 +66,24 @@ def write_csv(path: Path, fieldnames: list[str], rows: list[dict[str, str]]) -> 
         writer.writerows(rows)
 
 
+def parse_float_or_default(value: str | None, default: float) -> float:
+    text = str(value or "").strip()
+
+    if not text:
+        return default
+
+    return float(text)
+
+
 def parse_user_wb(value: str | None) -> tuple[float, float, float, float] | None:
     if not value:
         return None
 
-    parts = [p.strip() for p in value.split(",")]
+    text = value.strip()
+    if not text:
+        return None
+
+    parts = [p.strip() for p in text.split(",")]
 
     if len(parts) != 4:
         raise ValueError("--user-wb must be four comma-separated values, like 2.0,1.0,1.4,1.0")
@@ -63,6 +92,83 @@ def parse_user_wb(value: str | None) -> tuple[float, float, float, float] | None
         return tuple(float(p) for p in parts)  # type: ignore[return-value]
     except ValueError as exc:
         raise ValueError("--user-wb values must be numbers") from exc
+
+
+def load_candidate_overrides(
+    overrides_path: Path | None,
+    defaults: PreviewSettings,
+) -> dict[str, PreviewSettings]:
+    if overrides_path is None:
+        return {}
+
+    if not overrides_path.exists():
+        raise FileNotFoundError(f"Override CSV not found: {overrides_path}")
+
+    _fieldnames, rows = read_csv_rows(overrides_path)
+    out: dict[str, PreviewSettings] = {}
+
+    for idx, row in enumerate(rows, start=2):
+        candidate_key = str(row.get("candidate_key", "")).strip()
+
+        if not candidate_key:
+            continue
+
+        wb_mode = str(row.get("wb", "")).strip() or defaults.wb_mode
+        exposure_mode = str(row.get("exposure_mode", "")).strip() or defaults.exposure_mode
+
+        if wb_mode not in VALID_WB_MODES:
+            raise ValueError(
+                f"{overrides_path}:{idx}: invalid wb {wb_mode!r}. "
+                f"Valid: {sorted(VALID_WB_MODES)}"
+            )
+
+        if exposure_mode not in VALID_EXPOSURE_MODES:
+            raise ValueError(
+                f"{overrides_path}:{idx}: invalid exposure_mode {exposure_mode!r}. "
+                f"Valid: {sorted(VALID_EXPOSURE_MODES)}"
+            )
+
+        out[candidate_key] = PreviewSettings(
+            wb_mode=wb_mode,
+            exposure_mode=exposure_mode,
+            target_median=parse_float_or_default(row.get("target_median"), defaults.target_median),
+            low_pct=parse_float_or_default(row.get("low_pct"), defaults.low_pct),
+            high_pct=parse_float_or_default(row.get("high_pct"), defaults.high_pct),
+            user_wb_text=(str(row.get("user_wb", "")).strip() or defaults.user_wb_text),
+            override_note=str(row.get("notes", "")).strip(),
+        )
+
+    return out
+
+
+def resolve_settings(
+    row: dict[str, str],
+    defaults: PreviewSettings,
+    overrides: dict[str, PreviewSettings],
+) -> tuple[str, PreviewSettings, bool]:
+    candidate_key = str(row.get("primary_candidate_key", "")).strip()
+
+    if candidate_key in overrides:
+        return candidate_key, overrides[candidate_key], True
+
+    return candidate_key, defaults, False
+
+
+def row_matches_candidate_filter(row: dict[str, str], candidate_filter: str | None) -> bool:
+    if candidate_filter is None:
+        return True
+
+    wanted = candidate_filter.strip()
+    if not wanted:
+        return True
+
+    primary = str(row.get("primary_candidate_key", "")).strip()
+    if primary == wanted:
+        return True
+
+    keys_text = str(row.get("candidate_keys", ""))
+    keys = [k.strip() for k in keys_text.split(";") if k.strip()]
+    return wanted in keys
 
 
 def read_raw_rgb(
@@ -89,9 +195,6 @@ def read_raw_rgb(
             raise ValueError("--wb custom requires --user-wb R,G1,B,G2")
         raw_user_wb = user_wb
 
-    # daylight mode:
-    # use_camera_wb=False, use_auto_wb=False, user_wb=None
-    # LibRaw/rawpy uses its fixed/daylight-style white balance path.
     with rawpy.imread(str(path)) as raw:
         rgb16 = raw.postprocess(
             use_camera_wb=use_camera_wb,
@@ -124,12 +227,6 @@ def resize_long_edge(img: np.ndarray, max_size: int) -> np.ndarray:
 
 
 def gray_world_wb(img: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-    """
-    Per-image gray-world white balance.
-
-    Useful for experiments, but not ideal as the default because it can make
-    images from the same scene drift differently based on framing/content.
-    """
     means = img.reshape(-1, 3).mean(axis=0)
     target = means.mean()
     scale = target / (means + eps)
@@ -145,17 +242,19 @@ def luminance(img: np.ndarray) -> np.ndarray:
     )
 
 
-def exposure_normalize(
+def soft_clip_highlights(img: np.ndarray) -> np.ndarray:
+    over = np.maximum(img - 1.0, 0.0)
+    out = np.where(img > 1.0, 1.0 + over / (1.0 + over), img)
+    return np.clip(out, 0.0, 1.0)
+
+
+def exposure_normalize_percentile(
     img: np.ndarray,
+    *,
     low_pct: float = 0.5,
     high_pct: float = 99.5,
     eps: float = 1e-6,
 ) -> np.ndarray:
-    """
-    Percentile-based tonal normalization.
-
-    This does not use Lightroom edits. It only makes previews easier to compare.
-    """
     y = luminance(img)
 
     lo = float(np.percentile(y, low_pct))
@@ -165,11 +264,139 @@ def exposure_normalize(
         return np.clip(img, 0.0, 1.0)
 
     out = (img - lo) / (hi - lo)
+    return soft_clip_highlights(out)
 
-    over = np.maximum(out - 1.0, 0.0)
-    out = np.where(out > 1.0, 1.0 + over / (1.0 + over), out)
 
-    return np.clip(out, 0.0, 1.0)
+def exposure_normalize_midtone(
+    img: np.ndarray,
+    *,
+    target_median: float = 0.38,
+    low_clip: float = 0.02,
+    high_clip: float = 0.92,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    y = luminance(img)
+
+    mask = (y > low_clip) & (y < high_clip)
+
+    if int(mask.sum()) < 100:
+        return exposure_normalize_percentile(img, low_pct=0.5, high_pct=99.5)
+
+    current_median = float(np.median(y[mask]))
+
+    if current_median <= eps:
+        return np.clip(img, 0.0, 1.0)
+
+    scale = target_median / current_median
+    out = img * scale
+
+    return soft_clip_highlights(out)
+
+
+def center_weight_mask(h: int, w: int) -> np.ndarray:
+    yy, xx = np.mgrid[0:h, 0:w]
+
+    cx = (w - 1) / 2.0
+    cy = (h - 1) / 2.0
+
+    x = (xx - cx) / max(w, 1)
+    y = (yy - cy) / max(h, 1)
+
+    r2 = x * x + y * y
+    return np.exp(-r2 / 0.08).astype(np.float32)
+
+
+def weighted_quantile(values: np.ndarray, weights: np.ndarray, quantile: float) -> float:
+    values = values.reshape(-1)
+    weights = weights.reshape(-1)
+
+    valid = np.isfinite(values) & np.isfinite(weights) & (weights > 0)
+
+    if int(valid.sum()) == 0:
+        return float(np.median(values))
+
+    values = values[valid]
+    weights = weights[valid]
+
+    order = np.argsort(values)
+    values = values[order]
+    weights = weights[order]
+
+    cumulative = np.cumsum(weights)
+    cutoff = quantile * cumulative[-1]
+
+    idx = int(np.searchsorted(cumulative, cutoff, side="left"))
+    idx = min(max(idx, 0), len(values) - 1)
+
+    return float(values[idx])
+
+
+def exposure_normalize_center_midtone(
+    img: np.ndarray,
+    *,
+    target_median: float = 0.38,
+    low_clip: float = 0.02,
+    high_clip: float = 0.92,
+    eps: float = 1e-6,
+) -> np.ndarray:
+    y = luminance(img)
+    h, w = y.shape[:2]
+
+    center_weights = center_weight_mask(h, w)
+    midtone_mask = (y > low_clip) & (y < high_clip)
+
+    weights = np.where(midtone_mask, center_weights, 0.0).astype(np.float32)
+
+    if int(np.count_nonzero(weights)) < 100:
+        return exposure_normalize_midtone(
+            img,
+            target_median=target_median,
+            low_clip=low_clip,
+            high_clip=high_clip,
+        )
+
+    current_median = weighted_quantile(y, weights, 0.5)
+
+    if current_median <= eps:
+        return np.clip(img, 0.0, 1.0)
+
+    scale = target_median / current_median
+    out = img * scale
+
+    return soft_clip_highlights(out)
+
+
+def apply_exposure_normalization(
+    img: np.ndarray,
+    *,
+    exposure_mode: str,
+    low_pct: float,
+    high_pct: float,
+    target_median: float,
+) -> np.ndarray:
+    if exposure_mode == "percentile":
+        return exposure_normalize_percentile(
+            img,
+            low_pct=low_pct,
+            high_pct=high_pct,
+        )
+
+    if exposure_mode == "midtone":
+        return exposure_normalize_midtone(
+            img,
+            target_median=target_median,
+        )
+
+    if exposure_mode == "center-midtone":
+        return exposure_normalize_center_midtone(
+            img,
+            target_median=target_median,
+        )
+
+    raise ValueError(
+        f"Invalid exposure_mode: {exposure_mode}. "
+        f"Valid modes: {sorted(VALID_EXPOSURE_MODES)}"
+    )
 
 
 def to_viewable_srgb_uint8(img: np.ndarray) -> np.ndarray:
@@ -189,26 +416,27 @@ def normalize_for_search(
     img: np.ndarray,
     *,
     max_size: int,
-    low_pct: float,
-    high_pct: float,
-    wb_mode: str,
+    settings: PreviewSettings,
 ) -> np.ndarray:
     out = img
 
-    # Only apply content-dependent WB when explicitly requested.
-    if wb_mode == "gray-world":
+    if settings.wb_mode == "gray-world":
         out = gray_world_wb(out)
 
-    out = exposure_normalize(out, low_pct=low_pct, high_pct=high_pct)
+    out = apply_exposure_normalization(
+        out,
+        exposure_mode=settings.exposure_mode,
+        low_pct=settings.low_pct,
+        high_pct=settings.high_pct,
+        target_median=settings.target_median,
+    )
+
     out = resize_long_edge(out, max_size=max_size)
     return out
 
 
 def debug_original_preview(img: np.ndarray, max_size: int) -> np.ndarray:
-    """
-    Basic viewable preview from the RAW render before Nazariya normalization.
-    """
-    out = exposure_normalize(img, low_pct=0.1, high_pct=99.9)
+    out = exposure_normalize_percentile(img, low_pct=0.1, high_pct=99.9)
     out = resize_long_edge(out, max_size=max_size)
     return out
 
@@ -222,14 +450,37 @@ def build_previews(
     high_pct: float = 99.5,
     wb_mode: str = "daylight",
     user_wb_text: str | None = None,
+    exposure_mode: str = "center-midtone",
+    target_median: float = 0.38,
+    overrides_path: Path | None = None,
+    candidate_filter: str | None = None,
     overwrite: bool = False,
 ) -> PreviewBuildResult:
     if wb_mode not in VALID_WB_MODES:
         raise ValueError(f"--wb must be one of: {', '.join(sorted(VALID_WB_MODES))}")
 
-    user_wb = parse_user_wb(user_wb_text)
+    if exposure_mode not in VALID_EXPOSURE_MODES:
+        raise ValueError(
+            f"--exposure-mode must be one of: {', '.join(sorted(VALID_EXPOSURE_MODES))}"
+        )
 
-    _fieldnames, rows = read_csv_rows(input_path)
+    defaults = PreviewSettings(
+        wb_mode=wb_mode,
+        exposure_mode=exposure_mode,
+        target_median=target_median,
+        low_pct=low_pct,
+        high_pct=high_pct,
+        user_wb_text=user_wb_text,
+    )
+
+    overrides = load_candidate_overrides(overrides_path, defaults)
+
+    _fieldnames, rows_all = read_csv_rows(input_path)
+    rows = [
+        row
+        for row in rows_all
+        if row_matches_candidate_filter(row, candidate_filter)
+    ]
 
     normalized_dir = output_root / "normalized"
     debug_dir = output_root / "debug_original"
@@ -259,6 +510,10 @@ def build_previews(
             })
             continue
 
+        candidate_key, settings, override_applied = resolve_settings(row, defaults, overrides)
+        effective_raw_wb_mode = settings.wb_mode if settings.wb_mode != "gray-world" else "daylight"
+        user_wb = parse_user_wb(settings.user_wb_text)
+
         image_id = stable_id(str(source_path))
         normalized_path = normalized_dir / f"{image_id}.jpg"
         debug_path = debug_dir / f"{image_id}.jpg"
@@ -269,7 +524,7 @@ def build_previews(
             try:
                 rgb = read_raw_rgb(
                     source_path,
-                    wb_mode=wb_mode if wb_mode != "gray-world" else "daylight",
+                    wb_mode=effective_raw_wb_mode,
                     user_wb=user_wb,
                 )
 
@@ -277,9 +532,7 @@ def build_previews(
                 norm_img = normalize_for_search(
                     rgb,
                     max_size=max_size,
-                    low_pct=low_pct,
-                    high_pct=high_pct,
-                    wb_mode=wb_mode,
+                    settings=settings,
                 )
 
                 save_jpeg(debug_path, debug_img)
@@ -291,6 +544,7 @@ def build_previews(
                 failure_rows.append({
                     "row": str(index),
                     "source_path": str(source_path),
+                    "candidate_key": candidate_key,
                     "error": repr(exc),
                 })
                 continue
@@ -305,10 +559,16 @@ def build_previews(
             "file_name": str(row.get("file_name", "")),
             "file_stem": str(row.get("file_stem", "")),
             "capture_time": str(row.get("capture_time", "")),
-            "wb_mode": wb_mode,
+            "wb_mode": settings.wb_mode,
+            "exposure_mode": settings.exposure_mode,
+            "target_median": str(settings.target_median),
+            "low_pct": str(settings.low_pct),
+            "high_pct": str(settings.high_pct),
+            "user_wb": settings.user_wb_text or "",
+            "override_applied": "true" if override_applied else "false",
+            "override_note": settings.override_note,
+            "candidate_filter": candidate_filter or "",
             "max_size": str(max_size),
-            "low_pct": str(low_pct),
-            "high_pct": str(high_pct),
         })
 
     write_csv(
@@ -324,16 +584,22 @@ def build_previews(
             "file_stem",
             "capture_time",
             "wb_mode",
-            "max_size",
+            "exposure_mode",
+            "target_median",
             "low_pct",
             "high_pct",
+            "user_wb",
+            "override_applied",
+            "override_note",
+            "candidate_filter",
+            "max_size",
         ],
         map_rows,
     )
 
     write_csv(
         failures_path,
-        ["row", "source_path", "error"],
+        ["row", "source_path", "candidate_key", "error"],
         failure_rows,
     )
 
@@ -347,4 +613,8 @@ def build_previews(
         preview_map_path=map_path,
         failures_path=failures_path,
         wb_mode=wb_mode,
+        exposure_mode=exposure_mode,
+        overrides_path=overrides_path,
+        overrides_loaded=len(overrides),
+        candidate_filter=candidate_filter,
     )
