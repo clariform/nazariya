@@ -434,6 +434,23 @@ def normalize_for_search(
     out = resize_long_edge(out, max_size=max_size)
     return out
 
+def safe_exists(path: Path) -> bool:
+    try:
+        return path.exists()
+    except TimeoutError as exc:
+        raise RuntimeError(
+            "Filesystem timeout while checking an output file.\n"
+            f"Path: {path}\n\n"
+            "This usually means a network volume became stale or unresponsive.\n"
+            "Try remounting the volume, or write previews to local scratch first."
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(
+            "Filesystem error while checking an output file.\n"
+            f"Path: {path}\n"
+            f"Error: {exc}"
+        ) from exc
+
 
 def debug_original_preview(img: np.ndarray, max_size: int) -> np.ndarray:
     out = exposure_normalize_percentile(img, low_pct=0.1, high_pct=99.9)
@@ -518,7 +535,7 @@ def build_previews(
         normalized_path = normalized_dir / f"{image_id}.jpg"
         debug_path = debug_dir / f"{image_id}.jpg"
 
-        if normalized_path.exists() and debug_path.exists() and not overwrite:
+        if safe_exists(normalized_path) and safe_exists(debug_path) and not overwrite:
             skipped_existing += 1
         else:
             try:
