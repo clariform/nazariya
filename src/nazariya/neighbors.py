@@ -120,6 +120,8 @@ def row_label(
 def feature_label(data: np.lib.npyio.NpzFile) -> str:
     clip_weight = ""
     color_weight = ""
+    background_weight = ""
+    version = ""
 
     if "clip_weight" in data.files:
         try:
@@ -132,6 +134,24 @@ def feature_label(data: np.lib.npyio.NpzFile) -> str:
             color_weight = f"{float(data['color_weight'][0]):.2f}"
         except Exception:
             color_weight = ""
+
+    if "background_weight" in data.files:
+        try:
+            background_weight = f"{float(data['background_weight'][0]):.2f}"
+        except Exception:
+            background_weight = ""
+
+    if "feature_version" in data.files:
+        try:
+            version = str(data["feature_version"][0])
+        except Exception:
+            version = ""
+
+    if clip_weight and background_weight:
+        label = f"CLIP {clip_weight} / bg {background_weight}"
+        if version:
+            label = f"{label} | {version}"
+        return label
 
     if clip_weight and color_weight:
         return f"CLIP {clip_weight} / color {color_weight}"
