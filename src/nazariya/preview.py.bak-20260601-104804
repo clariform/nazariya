@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -171,53 +170,6 @@ def row_matches_candidate_filter(row: dict[str, str], candidate_filter: str | No
     keys = [k.strip() for k in keys_text.split(";") if k.strip()]
     return wanted in keys
 
-
-
-def resolve_source_path(path: Path) -> Path:
-    """
-    Resolve Lightroom-exported source_path through PROETUS_IMAGES_ROOT.
-
-    The Lightroom candidate CSV may contain machine-specific paths, for example:
-
-      /Users/suhail/Mounts/dataLib/Pictures/Images/...
-
-    During travel, the same image tree may live on Orion:
-
-      /Volumes/Orion/Pictures/Images/...
-
-    Rather than rewriting CSVs per machine, keep the CSV stable and remap the
-    root at runtime using PROETUS_IMAGES_ROOT.
-    """
-    if path.exists():
-        return path
-
-    images_root_text = os.environ.get("PROETUS_IMAGES_ROOT", "").strip()
-
-    if not images_root_text:
-        return path
-
-    images_root = Path(images_root_text).expanduser()
-
-    markers = [
-        "/Pictures/Images/",
-        "/Images/",
-    ]
-
-    path_text = str(path)
-
-    for marker in markers:
-        if marker in path_text:
-            relative = path_text.split(marker, 1)[1]
-            candidate = images_root / relative
-
-            if candidate.exists():
-                return candidate
-
-            # Return the remapped path even if it does not exist yet.
-            # This makes failures.csv point at the intended current-machine path.
-            return candidate
-
-    return path
 
 def read_raw_rgb(
     path: Path,
@@ -564,7 +516,7 @@ def build_previews(
 
     for index, row in enumerate(rows, start=1):
         source_path_text = str(row.get("source_path", "")).strip()
-        source_path = resolve_source_path(Path(source_path_text))
+        source_path = Path(source_path_text)
 
         if not source_path_text:
             failed += 1
