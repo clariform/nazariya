@@ -1,23 +1,38 @@
 from __future__ import annotations
 
 from pathlib import Path
-
+from nazariya.style.cli import app as style_app
+from nazariya.lureva.cli import app as lureva_app
 import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 
 from nazariya import __version__
-from nazariya.bgseg_features import extract_background_features
-from nazariya.features import extract_features
-from nazariya.neighbors import generate_neighbor_sheets
-from nazariya.preview import build_previews
-from nazariya.review import make_contact_sheets, make_overrides_template
-from nazariya.sample import sample_candidates, swap_sample_row
+from nazariya.search import (
+    build_previews,
+    extract_background_features,
+    extract_features,
+    generate_neighbor_sheets,
+    make_contact_sheets,
+    make_overrides_template,
+    sample_candidates,
+    swap_sample_row,
+)
 
 app = typer.Typer(
     help="Local visual search and clustering for image archives.",
     invoke_without_command=True,
+)
+app.add_typer(
+    style_app,
+    name="style",
+    help="Analyze and learn global photo-editing starting points.",
+)
+app.add_typer(
+    lureva_app,
+    name="lureva",
+    help="Prepare and review the Lureva production-selection corpus.",
 )
 console = Console()
 
