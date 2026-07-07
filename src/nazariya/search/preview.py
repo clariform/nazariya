@@ -5,6 +5,7 @@ import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import numpy as np
@@ -520,6 +521,7 @@ def build_previews(
     overrides_path: Path | None = None,
     candidate_filter: str | None = None,
     overwrite: bool = False,
+    progress_callback: Callable[[int, int, dict[str, str], str, int], None] | None = None,
 ) -> PreviewBuildResult:
     if wb_mode not in VALID_WB_MODES:
         raise ValueError(f"--wb must be one of: {', '.join(sorted(VALID_WB_MODES))}")
@@ -573,6 +575,8 @@ def build_previews(
                 "source_path": "",
                 "error": "missing source_path",
             })
+            if progress_callback is not None:
+                progress_callback(index, len(rows), row, "failed", failed)
             continue
 
         candidate_key, settings, override_applied = resolve_settings(row, defaults, overrides)
@@ -583,6 +587,7 @@ def build_previews(
         normalized_path = normalized_dir / f"{image_id}.jpg"
         debug_path = debug_dir / f"{image_id}.jpg"
 
+        status = "skipped"
         if safe_exists(normalized_path) and safe_exists(debug_path) and not overwrite:
             skipped_existing += 1
         else:
@@ -604,6 +609,7 @@ def build_previews(
                 save_jpeg(normalized_path, norm_img)
 
                 rendered += 1
+                status = "rendered"
             except Exception as exc:
                 failed += 1
                 failure_rows.append({
@@ -612,6 +618,8 @@ def build_previews(
                     "candidate_key": candidate_key,
                     "error": repr(exc),
                 })
+                if progress_callback is not None:
+                    progress_callback(index, len(rows), row, "failed", failed)
                 continue
 
         map_rows.append({
@@ -635,6 +643,8 @@ def build_previews(
             "candidate_filter": candidate_filter or "",
             "max_size": str(max_size),
         })
+        if progress_callback is not None:
+            progress_callback(index, len(rows), row, status, failed)
 
     write_csv(
         map_path,

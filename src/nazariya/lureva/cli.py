@@ -8,6 +8,7 @@ from rich.table import Table
 
 from nazariya.lureva.groups import build_group_pools, propose_groups
 from nazariya.lureva.ingest import IngestError, ingest_milestone_one
+from nazariya.lureva.review import build_group_review_contact_sheets
 from nazariya.lureva.paths import LurevaPaths
 
 app = typer.Typer(
@@ -160,4 +161,55 @@ def propose_groups_command(
     table.add_row("Eligible groups", f"{result.eligible_groups:,}")
     table.add_row("Requested groups", f"{result.requested_groups:,}")
     table.add_row("Proposed groups", f"{result.proposed_groups:,}")
+    console.print(table)
+
+
+@app.command("group-review-contact-sheets")
+def group_review_contact_sheets_command(
+    pool_run: str = typer.Option(..., "--pool-run", help="Completed group-pool run."),
+    proposal_run: str = typer.Option(..., "--proposal-run", help="Completed group proposal run."),
+    root: Path = typer.Option(Path("data/lureva"), "--root", help="Lureva selection workspace."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Optional stable run identifier."),
+    selected_pool_samples: int = typer.Option(10, "--selected-pool-samples", min=1),
+    unselected_pool_samples: int = typer.Option(6, "--unselected-pool-samples", min=1),
+    reference_limit: int = typer.Option(6, "--reference-limit", min=1),
+    max_preview_size: int = typer.Option(640, "--max-preview-size", min=128),
+    overwrite_previews: bool = typer.Option(False, "--overwrite-previews"),
+    resume: bool = typer.Option(False, "--resume", help="Reuse an existing run and rebuild sheets from cached previews."),
+    sheets_only: bool = typer.Option(False, "--sheets-only", help="Skip RAW rendering and rebuild sheets from the existing preview map."),
+    progress: bool = typer.Option(True, "--progress/--no-progress", help="Show live progress while rendering and composing sheets."),
+) -> None:
+    """Render proposed and unselected eligible candidate groups for visual review."""
+    try:
+        result = build_group_review_contact_sheets(
+            root=root,
+            pool_run=pool_run,
+            proposal_run=proposal_run,
+            run_id=run_id,
+            selected_pool_samples=selected_pool_samples,
+            unselected_pool_samples=unselected_pool_samples,
+            reference_limit=reference_limit,
+            max_preview_size=max_preview_size,
+            overwrite_previews=overwrite_previews,
+            show_progress=progress,
+            resume=resume,
+            sheets_only=sheets_only,
+        )
+    except (IngestError, ValueError, RuntimeError) as error:
+        console.print(f"[bold red]Group review failed:[/bold red] {error}")
+        raise typer.Exit(code=1) from error
+
+    table = Table(title="Lureva group review contact sheets")
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Run", result.run_id)
+    table.add_row("Run directory", str(result.run_dir))
+    table.add_row("Eligible groups", f"{result.eligible_groups:,}")
+    table.add_row("Proposed groups", f"{result.proposed_groups:,}")
+    table.add_row("Unselected groups", f"{result.unselected_groups:,}")
+    table.add_row("Review images", f"{result.review_images:,}")
+    table.add_row("Previews rendered", f"{result.previews_rendered:,}")
+    table.add_row("Preview failures", f"{result.preview_failures:,}")
+    table.add_row("Detail sheets", f"{result.detail_sheets:,}")
+    table.add_row("Overview sheets", f"{result.overview_sheets:,}")
     console.print(table)
