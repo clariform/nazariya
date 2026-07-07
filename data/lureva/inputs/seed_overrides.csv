@@ -1,0 +1,2 @@
+action,old_photo_uuid,old_source_path,old_corpus_file_name,new_photo_uuid,new_source_path,new_corpus_file_name,reason
+replace,7244FE4F-33C3-489B-BECD-F9269C4E92E3,/Volumes/Orion/Pictures/Images/2018/2018-07/2018-07-21/_DSC2139.ARW,_DSC2139_2018_07_21_SUHAIL.DNG,1A8C631E-AAB4-4F20-BCF6-6D202CD99DC1,/Volumes/dataLib/Pictures/Images/2019/2019-07/2019-07-25/DSC02550.ARW,DSC02550_2019_07_25_SUHAIL.DNG,Replaced while building the current Lureva 560-image corpus

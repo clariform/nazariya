@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from nazariya.lureva.ingest import IngestError, ingest_milestone_one
+from nazariya.lureva.paths import LurevaPaths
+
+app = typer.Typer(
+    help="Prepare and review the Lureva 960-image production selection.",
+    no_args_is_help=True,
+)
+console = Console()
+
+
+@app.command("init")
+def init_command(
+    root: Path = typer.Option(Path("data/lureva"), "--root", help="Lureva selection workspace."),
+) -> None:
+    """Create the Lureva selection workspace."""
+    folders = LurevaPaths(root).create()
+    console.print("[bold green]Created Lureva workspace:[/bold green]")
+    for folder in folders:
+        console.print(f"  {folder}")
+
+
+@app.command("ingest")
+def ingest_command(
+    catalog: Path = typer.Option(..., "--catalog", help="Lightroom candidate inventory CSV."),
+    seed: Path = typer.Option(..., "--seed", help="Current 560-image Lureva corpus CSV."),
+    root: Path = typer.Option(Path("data/lureva"), "--root", help="Lureva selection workspace."),
+    exclude_part2: bool = typer.Option(
+        True,
+        "--exclude-part2/--include-part2",
+        help="Exclude seed images carrying p001 through p008.",
+    ),
+    run_id: str | None = typer.Option(None, "--run-id", help="Optional stable run identifier."),
+    expected_catalog_candidates: int | None = typer.Option(
+        39393,
+        "--expected-catalog-candidates",
+        help="Expected number of unique c001-c325 RAW source files. Use 0 to disable.",
+    ),
+    overrides: Path | None = typer.Option(
+        None,
+        "--overrides",
+        help="Optional seed replacement/override CSV.",
+    ),
+    expected_seed_rows: int | None = typer.Option(
+        560,
+        "--expected-seed-rows",
+        help="Expected number of seed corpus images. Use 0 to disable.",
+    ),
+) -> None:
+    """Normalize the catalog and seed corpus, match source identities, and write an audit."""
+    try:
+        result = ingest_milestone_one(
+            catalog_csv=catalog,
+            seed_csv=seed,
+            root=root,
+            exclude_part2=exclude_part2,
+            run_id=run_id,
+            expected_catalog_candidates=expected_catalog_candidates or None,
+            expected_seed_rows=expected_seed_rows or None,
+            overrides_csv=overrides,
+        )
+    except IngestError as error:
+        console.print(f"[bold red]Ingest failed:[/bold red] {error}")
+        raise typer.Exit(code=1) from error
+
+    table = Table(title="Lureva Milestone 1 ingest")
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Run", result.run_id)
+    table.add_row("Run directory", str(result.run_dir))
+    table.add_row("SQLite state", str(result.database_path))
+    table.add_row("Catalog rows read", f"{result.catalog_rows_read:,}")
+    table.add_row("Candidate catalog rows", f"{result.catalog_candidate_rows:,}")
+    table.add_row("RAW catalog records", f"{result.catalog_raw_rows:,}")
+    table.add_row("Unique RAW source files", f"{result.catalog_unique_raws:,}")
+    table.add_row("Duplicate catalog records", f"{result.catalog_duplicate_records:,}")
+    table.add_row("Ignored non-RAW rows", f"{result.catalog_non_raw_rows:,}")
+    table.add_row("Seed rows read", f"{result.seed_rows_read:,}")
+    table.add_row("Seed rows after filter", f"{result.seed_rows_after_filter:,}")
+    table.add_row("Matched", f"{result.matched_rows:,}")
+    table.add_row("Ambiguous", f"{result.ambiguous_rows:,}")
+    table.add_row("Unmatched", f"{result.unmatched_rows:,}")
+    table.add_row("Represented groups", f"{result.represented_groups:,}")
+    table.add_row("Overrides applied", f"{result.overrides_applied:,}")
+    table.add_row("Part 2 excluded", str(result.exclude_part2))
+    console.print(table)
+
+    if result.ambiguous_rows or result.unmatched_rows:
+        console.print(
+            "[yellow]Identity issues remain. Review match_issues.csv before group selection.[/yellow]"
+        )
+    else:
+        console.print("[bold green]All filtered seed images matched uniquely.[/bold green]")

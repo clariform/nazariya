@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Nazariya Lureva generated state
+data/lureva/runs/
+data/lureva/manifests/
+data/lureva/reports/
+data/lureva/state/
