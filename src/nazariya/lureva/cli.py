@@ -6,6 +6,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from nazariya.lureva.groups import build_group_pools, propose_groups
 from nazariya.lureva.ingest import IngestError, ingest_milestone_one
 from nazariya.lureva.paths import LurevaPaths
 
@@ -98,3 +99,65 @@ def ingest_command(
         )
     else:
         console.print("[bold green]All filtered seed images matched uniquely.[/bold green]")
+
+
+@app.command("build-group-pools")
+def build_group_pools_command(
+    reference_run: str = typer.Option(..., "--reference-run", help="Effective Part 1 ingest run."),
+    exclusion_run: str = typer.Option(..., "--exclusion-run", help="Effective full-corpus ingest run used to exclude all existing images."),
+    root: Path = typer.Option(Path("data/lureva"), "--root", help="Lureva selection workspace."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Optional stable run identifier."),
+    minimum_images: int = typer.Option(20, "--minimum-images", min=1),
+    preferred_images: int = typer.Option(30, "--preferred-images", min=1),
+) -> None:
+    """Build unused RAW pools for Part 1-represented candidate groups."""
+    try:
+        result = build_group_pools(
+            root=root,
+            reference_run=reference_run,
+            exclusion_run=exclusion_run,
+            run_id=run_id,
+            minimum_images=minimum_images,
+            preferred_images=preferred_images,
+        )
+    except IngestError as error:
+        console.print(f"[bold red]Group-pool build failed:[/bold red] {error}")
+        raise typer.Exit(code=1) from error
+
+    table = Table(title="Lureva Milestone 2 group pools")
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Run", result.run_id)
+    table.add_row("Run directory", str(result.run_dir))
+    table.add_row("Part 1 references", f"{result.reference_images:,}")
+    table.add_row("Existing corpus excluded", f"{result.excluded_images:,}")
+    table.add_row("Represented groups", f"{result.represented_groups:,}")
+    table.add_row("Eligible groups", f"{result.eligible_groups:,}")
+    table.add_row("Unique unused RAWs", f"{result.unique_pool_images:,}")
+    table.add_row("Pool memberships", f"{result.pool_memberships:,}")
+    console.print(table)
+
+
+@app.command("propose-groups")
+def propose_groups_command(
+    pool_run: str = typer.Option(..., "--pool-run", help="Completed group-pool run."),
+    count: int = typer.Option(48, "--count", min=1),
+    root: Path = typer.Option(Path("data/lureva"), "--root", help="Lureva selection workspace."),
+    run_id: str | None = typer.Option(None, "--run-id", help="Optional stable run identifier."),
+) -> None:
+    """Create a deterministic first proposal of candidate groups."""
+    try:
+        result = propose_groups(root=root, pool_run=pool_run, count=count, run_id=run_id)
+    except IngestError as error:
+        console.print(f"[bold red]Group proposal failed:[/bold red] {error}")
+        raise typer.Exit(code=1) from error
+
+    table = Table(title="Lureva Milestone 2 group proposal")
+    table.add_column("Field", style="bold")
+    table.add_column("Value")
+    table.add_row("Run", result.run_id)
+    table.add_row("Run directory", str(result.run_dir))
+    table.add_row("Eligible groups", f"{result.eligible_groups:,}")
+    table.add_row("Requested groups", f"{result.requested_groups:,}")
+    table.add_row("Proposed groups", f"{result.proposed_groups:,}")
+    console.print(table)
