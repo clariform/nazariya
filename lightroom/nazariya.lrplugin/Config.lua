@@ -14,4 +14,13 @@ Config.raw_formats = {
     DNG = true,
 }
 
+-- Lureva 960-image review workflow.
+Config.lureva_review_collection_set = "Lureva 960 Review v0.1.0"
+-- Canonical Lightroom collection-set location for Lureva review work.
+-- Final root becomes: projects / lureva / <Config.lureva_review_collection_set>.
+Config.lureva_review_parent_collection_sets = { "projects", "lureva" }
+Config.lureva_required_groups = 48
+Config.lureva_required_picks_per_group = 20
+Config.lureva_manifest_directory = "/Users/suhail/Library/CloudStorage/Dropbox/matrix/packages/nazariya/data/lureva/runs"
+
 return Config
